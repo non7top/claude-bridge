@@ -2,22 +2,40 @@
 CLI entry point: argument parsing and mode dispatch. Thin - all real behavior
 lives in protocol.py / mcp_server.py / standalone.py.
 """
+import os
 import sys
 import json
 import asyncio
 import logging
 import argparse
+from logging.handlers import RotatingFileHandler
 
 from .protocol import ClaudeMessagingProtocol
 from .standalone import run_standalone
 # mcp_server pulls in fastmcp, which only the default (MCP stdio) mode needs -
 # import it lazily so --list/--send/--purge/--standalone don't pay that cost.
 
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stderr,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] [pid=%(process)d] %(message)s"
+_log_handlers = [logging.StreamHandler(sys.stderr)]
+try:
+    # A host-spawned bridge (uvx via Antigravity) has no persistent stderr to
+    # read after the fact - a real log file is the difference between "catch
+    # it live with strace" and "just read what happened." Shared across all
+    # bridge processes/workspaces; pid in the format string disambiguates
+    # interleaved lines. Rotated to bound growth on a long-lived daemon.
+    _log_dir = os.path.expanduser("~/.claude/logs")
+    os.makedirs(_log_dir, exist_ok=True)
+    _log_handlers.append(
+        RotatingFileHandler(
+            os.path.join(_log_dir, "claude-chatter.log"),
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3
+        )
+    )
+except OSError:
+    pass  # fall back to stderr-only rather than fail the whole process over logging
+
+logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=_log_handlers)
 logger = logging.getLogger("SocketBridgeMCP")
 
 
