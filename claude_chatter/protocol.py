@@ -270,6 +270,7 @@ class ClaudeMessagingProtocol:
             await writer.wait_closed()
 
             entry = {
+                "direction": "outbound",
                 "status": "dispatched",
                 "msg_id": msg_id,
                 "target_session": peer["name"],
@@ -399,6 +400,8 @@ class ClaudeMessagingProtocol:
 
                     # Cache response
                     self.response_store[msg_id] = {
+                        "direction": "inbound",
+                        "read": False,
                         "status": payload.get("status", "received"),
                         "sender": sender,
                         "content": content_val,
@@ -436,6 +439,27 @@ class ClaudeMessagingProtocol:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    def get_unread_messages(self, mark_read: bool = True) -> Dict[str, Dict[str, Any]]:
+        """
+        Returns currently-unread inbound messages (oldest first), the actual
+        "check my inbox" affordance for the async-mailbox model: since nothing
+        can reliably push/interrupt the connected host, whoever is checking
+        needs a way to see only what's new since they last looked, rather than
+        re-seeing the same history or having to track msg_ids themselves.
+        Marks the returned messages as read unless mark_read is False (to
+        peek without consuming).
+        """
+        unread = {
+            msg_id: entry
+            for msg_id, entry in self.response_store.items()
+            if entry.get("direction") == "inbound" and not entry.get("read", False)
+        }
+        unread = dict(sorted(unread.items(), key=lambda kv: kv[1].get("timestamp", 0)))
+        if mark_read:
+            for entry in unread.values():
+                entry["read"] = True
+        return unread
 
     async def start_bridge_listener(self):
         """
