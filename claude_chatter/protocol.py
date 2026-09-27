@@ -296,6 +296,49 @@ class ClaudeMessagingProtocol:
                 "error": f"Failed to send message over Unix socket to {socket_path}: {e}"
             }
 
+    def _compute_pid_domain(self, pid: int) -> str:
+        """
+        Builds the pidDomain field the way real Claude Code sessions do:
+        "linux:<contents of /etc/machine-id>:pid:[<this pid's PID-namespace
+        inode, from /proc/<pid>/ns/pid>]" - verified by comparing a real
+        session's descriptor against this host's actual /etc/machine-id and
+        /proc/<pid>/ns/pid. A prior version fabricated "linux:local:pid:[pid]"
+        (the literal PID, not its namespace inode, and a placeholder instead
+        of the real machine id) - plausibly why native cross-session
+        SendMessage could resolve this bridge by name but fail to actually
+        deliver to it. Falls back to that placeholder shape only if either
+        file is unreadable (e.g. non-Linux).
+        """
+        try:
+            with open("/etc/machine-id", "r", encoding="utf-8") as f:
+                machine_id = f.read().strip()
+        except OSError:
+            machine_id = "local"
+        try:
+            ns_link = os.readlink(f"/proc/{pid}/ns/pid")  # "pid:[4026532221]"
+            ns_part = ns_link.split(":", 1)[1] if ":" in ns_link else f"[{pid}]"
+        except OSError:
+            ns_part = f"[{pid}]"
+        return f"linux:{machine_id}:pid:{ns_part}"
+
+    def _compute_proc_start(self, pid: int) -> str:
+        """
+        Real Claude Code descriptors put /proc/<pid>/stat's 22nd field (process
+        start time in clock ticks since boot - the kernel's own anti-PID-reuse
+        value) in procStart, not the pid itself - verified against a real
+        session's descriptor (its procStart matched that field exactly; the
+        pid did not). Falls back to str(pid) only if /proc is unreadable.
+        """
+        try:
+            with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as f:
+                # Field 2 (comm) is parenthesized and may itself contain
+                # spaces/parens, so split after its closing paren rather than
+                # by naive whitespace splitting from the start.
+                after_comm = f.read().rsplit(")", 1)[1].split()
+                return after_comm[19]  # fields are 1-indexed; index from field 3 onward
+        except (OSError, IndexError):
+            return str(pid)
+
     def register_session_descriptor(self, session_name: str = "antigravity-bridge", kind: str = "bg"):
         """
         Registers a session descriptor in ~/.claude/sessions/ so that surrounding
@@ -323,13 +366,13 @@ class ClaudeMessagingProtocol:
             "sessionId": self.registered_session_id,
             "cwd": os.getcwd(),
             "startedAt": now,
-            "procStart": str(self.registered_pid),
+            "procStart": self._compute_proc_start(self.registered_pid),
             "version": "2.1.282",
             "peerProtocol": 1,
             "peerFeatures": ["notify_idle", "reply_across_default_dirs", "artifact_yield"],
             "kind": kind,
             "entrypoint": "cli",
-            "pidDomain": f"linux:local:pid:[{self.registered_pid}]",
+            "pidDomain": self._compute_pid_domain(self.registered_pid),
             "messagingSocketPath": self.bridge_socket_path,
             "name": session_name,
             "nameSource": "user",
@@ -341,7 +384,7 @@ class ClaudeMessagingProtocol:
 
         key_data = {
             "peerToken": self.registered_token,
-            "procStart": str(self.registered_pid)
+            "procStart": session_data["procStart"]
         }
 
         try:
