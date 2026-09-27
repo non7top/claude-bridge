@@ -123,11 +123,12 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
 
     @mcp.tool()
     async def rename_session(new_name: str) -> str:
-        """Renames this bridge's announced session descriptor in ~/.claude/sessions/ so Claude Code instances discover it under the new name via ListAgents."""
+        """Renames this bridge's announced session descriptor in ~/.claude/sessions/ so Claude Code instances discover it under the new name via ListAgents. Persisted for this workspace, so future restarts keep the renamed identity instead of reverting to the cwd-derived default."""
         old_name = protocol.session_name
         protocol.cleanup_session_descriptor()
         protocol.session_name = new_name
         protocol.register_session_descriptor(session_name=new_name)
+        protocol.persist_default_session_name(new_name)
         res = {
             "success": True,
             "previous_name": old_name,
