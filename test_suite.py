@@ -348,6 +348,75 @@ class TestMCPStdioProtocol(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_sigterm_triggers_graceful_shutdown_and_cleanup(self):
+        """Verify SIGTERM (not just SIGINT/Ctrl+C) on the default stdio mode
+        exits 0 and cleans up its session descriptor + socket - unlike SIGINT,
+        SIGTERM has no default Python-level handler, so without an explicit
+        one the process is killed raw by the OS (exit 143) and _lifespan's
+        cleanup never runs. This is exactly what a host gracefully stopping
+        the MCP subprocess for a reload (e.g. Antigravity's `/mcp` reload)
+        does, and it reads a non-zero/signal exit as a failed stop."""
+        script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "bridge_mcp.py"))
+        socket_path = f"/tmp/test_sigterm_{uuid.uuid4().hex[:8]}.sock"
+        session_name = f"suite-sigterm-{uuid.uuid4().hex[:8]}"
+        test_cwd = tempfile.mkdtemp(prefix="bridge_mcp_sigterm_test_")
+
+        proc = subprocess.Popen(
+            [sys.executable, script_path, "--socket", socket_path, "--name", session_name],
+            cwd=test_cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        sessions_dir = os.path.expanduser("~/.claude/sessions")
+        named_descriptor = os.path.join(sessions_dir, f"bridge-{session_name}.json")
+
+        try:
+            init_req = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-suite", "version": "1.0"}
+                }
+            }
+            proc.stdin.write(json.dumps(init_req) + "\n")
+            proc.stdin.flush()
+            proc.stdout.readline()  # wait for the response - confirms the lifespan has started
+
+            # Give the lifespan's registration a moment to land on disk.
+            for _ in range(50):
+                if os.path.exists(named_descriptor):
+                    break
+                time.sleep(0.1)
+            self.assertTrue(os.path.exists(named_descriptor), "session descriptor was never registered")
+
+            proc.terminate()  # SIGTERM
+            proc.wait(timeout=5)
+
+            self.assertEqual(proc.returncode, 0, f"expected clean exit 0, got {proc.returncode} (stderr: {proc.stderr.read()})")
+            self.assertFalse(os.path.exists(named_descriptor), "session descriptor was not cleaned up on SIGTERM")
+            self.assertFalse(os.path.exists(socket_path), "socket file was not cleaned up on SIGTERM")
+
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            for p in (named_descriptor, socket_path):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            try:
+                os.rmdir(test_cwd)
+            except OSError:
+                pass
+
 
 class TestBridgeStandaloneCLI(unittest.TestCase):
     def setUp(self):

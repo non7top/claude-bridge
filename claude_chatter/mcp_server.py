@@ -5,6 +5,7 @@ wires ClaudeMessagingProtocol into it and holds nothing else.
 """
 import os
 import json
+import signal
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -164,5 +165,36 @@ def make_protocol(bridge_socket_path: Optional[str], session_name: Optional[str]
 
 
 async def run_mcp_server(protocol: ClaudeMessagingProtocol):
+    """
+    SIGTERM has no default Python-level handler - unlike SIGINT, which the
+    interpreter itself converts into a catchable KeyboardInterrupt, an
+    unhandled SIGTERM kills the process immediately at the OS level, skipping
+    all cleanup and exiting 143 (128+SIGTERM) instead of 0. A host that
+    gracefully asks this process to stop (e.g. Antigravity's own `/mcp`
+    reload, which stops and restarts each configured MCP server) reads that
+    143 as this server having failed to stop cleanly, and refuses to reload.
+
+    Cancelling FastMCP's own run_stdio_async() task and waiting for it to
+    unwind (so _lifespan's finally block runs the cleanup) was tried first,
+    but was observed to hang indefinitely - the task never responds to
+    cancellation and the process never exits at all. Rather than depend on
+    FastMCP's internal shutdown behavior, the handler does the cleanup that
+    actually matters (the session descriptor and socket file - the same two
+    calls _lifespan's finally block makes) directly and exits immediately.
+    """
     mcp = build_mcp_server(protocol)
+    loop = asyncio.get_running_loop()
+
+    def _handle_signal(signum):
+        logger.info(f"Received signal {signum}; cleaning up and exiting.")
+        protocol.cleanup_session_descriptor()
+        protocol.cleanup_socket()
+        os._exit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _handle_signal, sig)
+        except (NotImplementedError, RuntimeError):
+            pass
+
     await mcp.run_stdio_async(show_banner=False)
