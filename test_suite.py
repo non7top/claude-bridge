@@ -210,6 +210,48 @@ class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass
 
+    async def test_inbound_real_claude_code_frame_format(self):
+        """Verify a real Claude Code SendMessage frame (no "sender" field -
+        identity embedded as from-name inside a <cross-session-message> tag
+        wrapping the actual text, per a live-captured real frame) is parsed
+        into a clean sender name and unwrapped content, not "unknown" and a
+        content string still containing the wrapper tag."""
+        server_task = asyncio.create_task(self.bridge.start_bridge_listener())
+        await asyncio.sleep(0.1)
+
+        reader, writer = await asyncio.open_unix_connection(self.socket_path)
+        msg_id = "real-format-msg-1"
+        real_frame = {
+            "msgV": 1,
+            "msg_id": msg_id,
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<cross-session-message from="uds:/run/user/1001/cc-socks/123.sock" '
+                    'from-name="some-real-session" from-mode="prompting">\n'
+                    'hello from a real session\n</cross-session-message>'
+                )
+            },
+            "priority": "next",
+            "from": "uds:/run/user/1001/cc-socks/123.sock"
+        }
+        writer.write((json.dumps(real_frame) + "\n").encode("utf-8"))
+        await writer.drain()
+        await reader.readline()
+        writer.close()
+        await writer.wait_closed()
+
+        cached = self.bridge.response_store[msg_id]
+        self.assertEqual(cached["sender"], "some-real-session")
+        self.assertEqual(cached["content"], "hello from a real session")
+
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+
     async def test_outbound_send_to_mock_peer(self):
         """Verify outbound frame formatting and delivery over target Unix domain socket."""
         mock_sock_path = os.path.join(self.tmp_dir.name, "mock_target.sock")
@@ -245,11 +287,13 @@ class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertTrue(res["success"])
-        self.assertEqual(len(received_frames), 2)
-        self.assertEqual(received_frames[0]["type"], "auth")
-        self.assertEqual(received_frames[0]["peerToken"], "secret_peer_token")
-        self.assertEqual(received_frames[1]["type"], "user")
-        self.assertEqual(received_frames[1]["message"]["content"], "Hello Mock Peer!")
+        self.assertEqual(len(received_frames), 1)
+        self.assertEqual(received_frames[0]["type"], "user")
+        self.assertEqual(received_frames[0]["msgV"], 1)
+        self.assertTrue(received_frames[0]["from"].startswith("uds:"))
+        content = received_frames[0]["message"]["content"]
+        self.assertIn('from-name="', content)
+        self.assertIn("Hello Mock Peer!", content)
 
         mock_server.close()
         await mock_server.wait_closed()
