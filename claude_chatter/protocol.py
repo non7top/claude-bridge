@@ -498,7 +498,17 @@ class ClaudeMessagingProtocol:
                             "timestamp": time.time()
                         })
 
-                    ack = json.dumps({"status": "received", "msg_id": msg_id}) + "\n"
+                    # Confirms receipt only - not that anything will act on it
+                    # promptly, or at all. This is an async mailbox: the other
+                    # side (a human or model) has to independently check
+                    # read_messages/get_responses to see it, so "received" here
+                    # must not be read as "seen" or "handled".
+                    ack = json.dumps({
+                        "status": "received",
+                        "msg_id": msg_id,
+                        "mode": "async-mailbox",
+                        "note": "Buffered for manual/periodic pickup via read_messages - no guaranteed prompt processing or reaction."
+                    }) + "\n"
                     try:
                         writer.write(ack.encode("utf-8"))
                         await writer.drain()
