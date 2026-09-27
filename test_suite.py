@@ -53,6 +53,36 @@ class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(os.path.exists(self.bridge.session_json_path))
         self.assertFalse(os.path.exists(self.bridge.session_key_path))
 
+    async def test_session_descriptor_pid_fields_match_real_kernel_values(self):
+        """Verify pidDomain/procStart are the real kernel-reported values a
+        native Claude Code session writes (machine-id + PID-namespace inode;
+        /proc/<pid>/stat's starttime field), not placeholders derived from
+        the literal pid - a real session's descriptor was observed to reject
+        cross-session delivery to a bridge using the old placeholder shape."""
+        self.bridge.register_session_descriptor(session_name="test-pid-fields")
+        try:
+            with open(self.bridge.session_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            try:
+                with open("/etc/machine-id", "r", encoding="utf-8") as f:
+                    machine_id = f.read().strip()
+            except OSError:
+                machine_id = "local"  # e.g. inside this project's own minimal test container
+            ns_part = os.readlink(f"/proc/{os.getpid()}/ns/pid").split(":", 1)[1]
+            self.assertEqual(data["pidDomain"], f"linux:{machine_id}:pid:{ns_part}")
+
+            with open(f"/proc/{os.getpid()}/stat", "r", encoding="utf-8") as f:
+                expected_proc_start = f.read().rsplit(")", 1)[1].split()[19]
+            self.assertEqual(data["procStart"], expected_proc_start)
+            self.assertNotEqual(data["procStart"], str(os.getpid()))
+
+            with open(self.bridge.session_key_path, "r", encoding="utf-8") as f:
+                key_data = json.load(f)
+            self.assertEqual(key_data["procStart"], data["procStart"])
+        finally:
+            self.bridge.cleanup_session_descriptor()
+
     async def test_dead_session_purging(self):
         """Verify purging of dead session descriptors and key files."""
         sessions_dir = self.bridge.sessions_dir
