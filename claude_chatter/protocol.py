@@ -9,6 +9,7 @@ reusable core that both the MCP entry point (mcp_server.py) and the
 standalone daemon entry point (standalone.py) build on top of.
 """
 import os
+import re
 import json
 import glob
 import uuid
@@ -233,7 +234,6 @@ class ClaudeMessagingProtocol:
             }
 
         socket_path = peer.get("socket")
-        token = peer.get("token", "")
 
         if not socket_path or not os.path.exists(socket_path):
             logger.error(f"Socket path for '{peer['name']}' does not exist: {socket_path}")
@@ -242,20 +242,36 @@ class ClaudeMessagingProtocol:
                 "error": f"Socket path '{socket_path}' for session '{peer['name']}' does not exist on disk."
             }
 
-        # Build NDJSON wire packets
-        auth_frame = {"type": "auth", "peerToken": token}
-        msg_id = f"msg_{uuid.uuid4()}"
+        # Wire format reverse-engineered from a real Claude Code SendMessage
+        # frame (captured directly off the socket): no separate auth frame,
+        # a "from" field holding this sender's own "uds:<socket path>" URI
+        # (not a bare name), a msgV version field, and the message content
+        # itself wrapped in a <cross-session-message from=... from-name=...
+        # from-mode=...> tag - the receiving side's pretty, reply-able
+        # rendering keys off that wrapper being present in the content, not
+        # off any separate top-level metadata field. A prior version omitted
+        # all of this and sent a bare "sender" name instead of "from" -
+        # real Claude Code sessions still buffered that content correctly,
+        # but rendered it as plain unwrapped text with no reply-to address,
+        # and (unconfirmed but consistent with every observed case) reported
+        # send failure back to the sender despite the content having arrived.
+        msg_id = str(uuid.uuid4())
+        from_uri = f"uds:{self.bridge_socket_path}"
+        wrapped_content = (
+            f'<cross-session-message from="{from_uri}" from-name="{self.session_name}" '
+            f'from-mode="prompting">\n{message_content}\n</cross-session-message>'
+        )
         message_frame = {
-            "type": "user",
-            "message": {"role": "user", "content": message_content},
-            "priority": "next",
+            "msgV": 1,
             "msg_id": msg_id,
-            "sender": self.session_name
+            "type": "user",
+            "message": {"role": "user", "content": wrapped_content},
+            "priority": "next",
+            "from": from_uri
         }
 
         try:
             reader, writer = await asyncio.open_unix_connection(socket_path)
-            writer.write((json.dumps(auth_frame) + "\n").encode("utf-8"))
             writer.write((json.dumps(message_frame) + "\n").encode("utf-8"))
             await writer.drain()
 
@@ -433,13 +449,34 @@ class ClaudeMessagingProtocol:
                         continue
 
                     msg_id = payload.get("msg_id", f"inbound_{uuid.uuid4()}")
-                    sender = payload.get("sender", "unknown")
 
                     msg_obj = payload.get("message", {})
                     if isinstance(msg_obj, dict):
                         content_val = msg_obj.get("content", payload.get("content", ""))
                     else:
                         content_val = payload.get("content", str(msg_obj))
+
+                    # Real Claude Code senders don't send a bare "sender" name -
+                    # they embed identity as from-name inside a
+                    # <cross-session-message from=... from-name=... from-mode=...>
+                    # wrapper around the actual text, with a top-level "from"
+                    # (a "uds:<socket path>" URI) as the only other identity
+                    # signal. Only our own older frames (and other bridges
+                    # still using the pre-fix format) send a plain "sender"
+                    # field, so that's tried first without breaking anything.
+                    sender = payload.get("sender")
+                    wrapper_match = re.match(
+                        r'^<cross-session-message\s+([^>]*)>\n(.*)\n</cross-session-message>$',
+                        content_val, re.DOTALL
+                    )
+                    if wrapper_match:
+                        attrs, inner_text = wrapper_match.groups()
+                        if sender is None:
+                            name_match = re.search(r'from-name="([^"]*)"', attrs)
+                            sender = name_match.group(1) if name_match else payload.get("from", "unknown")
+                        content_val = inner_text
+                    if sender is None:
+                        sender = payload.get("from", "unknown")
 
                     # Cache response
                     self.response_store[msg_id] = {
