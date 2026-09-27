@@ -78,6 +78,52 @@ class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(os.path.exists(fake_key))
 
 
+class TestUnreadMessages(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "test.sock"))
+
+    async def asyncTearDown(self):
+        self.tmp_dir.cleanup()
+
+    async def test_get_unread_messages_marks_read_and_excludes_outbound(self):
+        """Verify get_unread_messages returns only unread inbound entries, marks
+        them read by default, and never surfaces our own outbound dispatch
+        confirmations (which share the same response_store but aren't inbox
+        items)."""
+        self.bridge.response_store["out_1"] = {
+            "direction": "outbound", "status": "dispatched", "content": "hi"
+        }
+        self.bridge.response_store["in_1"] = {
+            "direction": "inbound", "read": False, "sender": "peer-a",
+            "content": "first", "timestamp": 1.0
+        }
+        self.bridge.response_store["in_2"] = {
+            "direction": "inbound", "read": False, "sender": "peer-b",
+            "content": "second", "timestamp": 2.0
+        }
+
+        unread = self.bridge.get_unread_messages()
+        self.assertEqual(list(unread.keys()), ["in_1", "in_2"])
+        self.assertTrue(self.bridge.response_store["in_1"]["read"])
+        self.assertTrue(self.bridge.response_store["in_2"]["read"])
+
+        # A second call should now return nothing - already marked read.
+        self.assertEqual(self.bridge.get_unread_messages(), {})
+
+    async def test_get_unread_messages_peek_without_consuming(self):
+        """Verify mark_read=False lets a caller peek without consuming."""
+        self.bridge.response_store["in_1"] = {
+            "direction": "inbound", "read": False, "sender": "peer-a",
+            "content": "first", "timestamp": 1.0
+        }
+        unread = self.bridge.get_unread_messages(mark_read=False)
+        self.assertEqual(list(unread.keys()), ["in_1"])
+        self.assertFalse(self.bridge.response_store["in_1"]["read"])
+        # still there on the next real read
+        self.assertEqual(list(self.bridge.get_unread_messages().keys()), ["in_1"])
+
+
 class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()

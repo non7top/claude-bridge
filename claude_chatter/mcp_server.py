@@ -20,9 +20,9 @@ logger = logging.getLogger("SocketBridgeMCP")
 
 INSTRUCTIONS = (
     "Bi-Directional AI Communication MCP Bridge for Claude Code sessions. "
-    "When you receive a tools/list_changed notification, call get_responses "
-    "(or list_sessions) to see what changed - inbound messages arrive that "
-    "way, not inline in the notification itself."
+    "When you receive a tools/list_changed notification, call read_messages "
+    "to see what's new - inbound messages arrive that way, not inline in the "
+    "notification itself."
 )
 
 
@@ -138,15 +138,21 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
 
     @mcp.tool()
     async def send_message(session: str, message: str) -> str:
-        """Dispatches an authenticated user message to a target Claude Code session. Fire-and-forget: any real reply the target sends back arrives later as its own inbound activity, observable via get_responses - this does not wait for or return a reply."""
+        """Dispatches an authenticated user message to a target Claude Code session. Fire-and-forget: any real reply the target sends back arrives later as its own inbound activity, observable via read_messages - this does not wait for or return a reply."""
         result = await protocol.send_to_claude(session_identifier=session, message_content=message)
         if not result.get("success", False):
             raise ToolError(result.get("error", "send_message failed"))
         return json.dumps(result, indent=2)
 
     @mcp.tool()
+    async def read_messages(mark_read: bool = True) -> str:
+        """Returns unread inbound messages (oldest first) - the inbox check for this async mailbox. Nothing can reliably interrupt you when a message arrives, so call this after a tools/list_changed notification, or periodically, to see what's new. Marks returned messages as read unless mark_read is set to false (to peek without consuming)."""
+        unread = protocol.get_unread_messages(mark_read=mark_read)
+        return json.dumps(unread, indent=2)
+
+    @mcp.tool()
     async def get_responses(msg_id: Optional[str] = None) -> str:
-        """Fetches inbound and outbound message response histories cached by the bridge."""
+        """Fetches the full inbound and outbound message history cached by the bridge, regardless of read state. Use read_messages instead to check for new inbound messages specifically."""
         resp = protocol.response_store.get(msg_id, {"error": f"Message ID '{msg_id}' not found."}) if msg_id else protocol.response_store
         return json.dumps(resp, indent=2)
 
