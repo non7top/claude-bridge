@@ -8,6 +8,7 @@ import json
 import time
 import glob
 import uuid
+import hashlib
 import asyncio
 import tempfile
 import unittest
@@ -82,6 +83,29 @@ class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(key_data["procStart"], data["procStart"])
         finally:
             self.bridge.cleanup_session_descriptor()
+
+    async def test_rename_session_name_persists_across_new_instances(self):
+        """Verify persist_default_session_name causes a freshly-constructed
+        protocol instance (simulating a process restart, which happens often
+        - every MCP host reload) to pick up the renamed identity instead of
+        reverting to the cwd-hash default."""
+        workspace = tempfile.mkdtemp(prefix="persist_name_test_")
+        old_cwd = os.getcwd()
+        os.chdir(workspace)
+        try:
+            first = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "p1.sock"))
+            self.assertTrue(first.session_name.startswith("antigravity-bridge-"))
+
+            first.persist_default_session_name("gwen")
+
+            second = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "p2.sock"))
+            self.assertEqual(second.session_name, "gwen")
+        finally:
+            os.chdir(old_cwd)
+            digest = hashlib.sha1(workspace.encode("utf-8")).hexdigest()[:8]
+            name_file = os.path.expanduser(f"~/.claude/chatter-session-names/{digest}.name")
+            if os.path.exists(name_file):
+                os.remove(name_file)
 
     async def test_dead_session_purging(self):
         """Verify purging of dead session descriptors and key files."""

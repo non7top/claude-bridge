@@ -56,15 +56,50 @@ class ClaudeMessagingProtocol:
         self.response_store: Dict[str, Dict[str, Any]] = {}
         self.active_peers: Dict[str, Dict[str, Any]] = {}
 
+    def _cwd_digest(self) -> str:
+        return hashlib.sha1(os.getcwd().encode("utf-8")).hexdigest()[:8]
+
+    def _persisted_name_path(self, cwd_digest: str) -> str:
+        d = os.path.join(self.home_dir, ".claude", "chatter-session-names")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, f"{cwd_digest}.name")
+
     def _derive_default_session_name(self) -> str:
         """
         Derives a stable, per-workspace default session name from cwd so that
         unrelated bridge instances (different Antigravity workspaces) never
         collide on the same socket, while the same workspace reconnecting
         across MCP host restarts always resolves back to the same identity.
+
+        If rename_session was ever called for this workspace, its persisted
+        name (one small file per cwd digest, so unrelated workspaces never
+        contend on the same file) wins over the cwd-hash default - a rename
+        is otherwise only in-memory and reverts on the next process restart,
+        which happens often (every MCP host reload).
         """
-        cwd_digest = hashlib.sha1(os.getcwd().encode("utf-8")).hexdigest()[:8]
+        cwd_digest = self._cwd_digest()
+        try:
+            with open(self._persisted_name_path(cwd_digest), "r", encoding="utf-8") as f:
+                persisted = f.read().strip()
+                if persisted:
+                    return persisted
+        except OSError:
+            pass
         return f"antigravity-bridge-{cwd_digest}"
+
+    def persist_default_session_name(self, name: str):
+        """
+        Remembers `name` as this workspace's default session name for future
+        process starts (see _derive_default_session_name). Only meaningful
+        for the cwd-derived default - an explicit --name/AGY_SESSION_NAME
+        override always wins regardless of what's persisted here.
+        """
+        try:
+            with open(self._persisted_name_path(self._cwd_digest()), "w", encoding="utf-8") as f:
+                f.write(name)
+            logger.info(f"Persisted '{name}' as this workspace's default session name.")
+        except OSError as e:
+            logger.error(f"Failed to persist session name '{name}': {e}")
 
     def _get_default_socket_path(self, pid: int, session_name: Optional[str] = None) -> str:
         sname = (session_name or getattr(self, "session_name", "antigravity-bridge")).replace("/", "-")
